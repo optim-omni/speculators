@@ -364,6 +364,7 @@ def main(args: argparse.Namespace):
     # Setup dataloaders
     preprocess_fns = {
         "eagle3": shift_batch,
+        "eagle1_train": shift_batch,
         "peagle": shift_batch,
         "mtp": shift_batch_mtp,
     }
@@ -492,7 +493,10 @@ def parse_args():
         "--speculator-type",
         type=str,
         default="eagle3",
-        help="Type of speculator model to train (eagle3, dflash, peagle, mtp)",
+        help=(
+            "Type of speculator model to train "
+            "(eagle3, eagle1_train, dflash, peagle, mtp)"
+        ),
     )
     parser.add_argument(
         "--from-pretrained",

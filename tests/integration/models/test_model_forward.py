@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 import torch
 
+from speculators.models.eagle3 import shift_batch
 from speculators.models.mtp import shift_batch_mtp
 from speculators.models.mtp.core import compute_step_weights
 from tests.conftest import requires_cuda, requires_transformers_version
@@ -22,6 +23,7 @@ from tests.integration.conftest import (
     VOCAB_SIZE,
     make_batch,
     make_dflash_model,
+    make_eagle1_train_model,
     make_eagle3_model,
     make_mtp_model,
     make_peagle_model,
@@ -67,6 +69,13 @@ class ModelSpec:
 
 
 DFLASH_SPEC = ModelSpec(name="dflash", factory=make_dflash_model)
+EAGLE1_TRAIN_SPEC = ModelSpec(
+    name="eagle1_train",
+    factory=make_eagle1_train_model,
+    forward_kwargs={"ttt_steps": 2},
+    hidden_multiplier=1,
+    batch_factory=partial(make_batch, num_target_layers=1, preprocess=shift_batch),
+)
 EAGLE3_SPEC = ModelSpec(
     name="eagle3", factory=make_eagle3_model, forward_kwargs={"ttt_steps": 2}
 )
@@ -82,6 +91,7 @@ MTP_SPEC = ModelSpec(
 
 ALL_SPECS = [
     pytest.param(DFLASH_SPEC, id="dflash"),
+    pytest.param(EAGLE1_TRAIN_SPEC, id="eagle1_train"),
     pytest.param(EAGLE3_SPEC, id="eagle3"),
     pytest.param(PEAGLE_SPEC, id="peagle"),
     pytest.param(MTP_SPEC, id="mtp", marks=_requires_qwen3_5),
@@ -89,6 +99,7 @@ ALL_SPECS = [
 
 VOCAB_SPECS = [
     pytest.param(DFLASH_SPEC, id="dflash"),
+    pytest.param(EAGLE1_TRAIN_SPEC, id="eagle1_train"),
     pytest.param(EAGLE3_SPEC, id="eagle3"),
     pytest.param(PEAGLE_SPEC, id="peagle"),
 ]
@@ -223,8 +234,16 @@ class TestVocabBoundary:
     @pytest.mark.parametrize("draft_vocab_model", VOCAB_SPECS, indirect=True)
     def test_boundary_tokens(self, draft_vocab_model):
         model, spec = draft_vocab_model
-        samples = _make_samples([128], vocab_size=32, boundary_token_ids=[0, 31])
-        batch = make_batch(max_len=MAX_LEN, samples=samples, hidden_size=HIDDEN_SIZE)
+        samples = _make_samples(
+            [128],
+            vocab_size=32,
+            hidden_size=spec.hidden_size,
+            hidden_multiplier=spec.hidden_multiplier,
+            boundary_token_ids=[0, 31],
+        )
+        batch = spec.batch_factory(
+            max_len=MAX_LEN, samples=samples, hidden_size=spec.hidden_size
+        )
         draft_tokens, loss, metrics = model(**batch, **spec.forward_kwargs)
 
         assert loss.isfinite()
@@ -273,6 +292,30 @@ class TestEagle3Params:
             assert dt.shape == (1, MAX_LEN)
             assert dt.dtype == torch.long
         assert loss.isfinite()
+        loss.backward()
+
+
+@requires_cuda
+class TestEagle1TrainParams:
+    @pytest.mark.parametrize("ttt_steps", [1, 2, 4])
+    def test_varying_ttt_steps(self, ttt_steps):
+        model = make_eagle1_train_model()
+        samples = _make_samples([128], hidden_multiplier=1)
+        batch = make_batch(
+            max_len=MAX_LEN,
+            samples=samples,
+            hidden_size=HIDDEN_SIZE,
+            num_target_layers=1,
+            preprocess=shift_batch,
+        )
+        draft_tokens, loss, metrics = model(**batch, ttt_steps=ttt_steps)
+
+        assert len(draft_tokens) == ttt_steps
+        for dt in draft_tokens:
+            assert dt.shape == (1, MAX_LEN)
+            assert dt.dtype == torch.long
+        assert loss.isfinite()
+        assert metrics["loss_total"].item() == 1.0
         loss.backward()
 
 

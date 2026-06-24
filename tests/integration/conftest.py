@@ -11,6 +11,8 @@ from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 from speculators import SpeculatorsConfig, VerifierConfig
 from speculators.models.dflash import DFlashSpeculatorConfig
 from speculators.models.dflash.core import DFlashDraftModel
+from speculators.models.eagle1_train import Eagle1TrainDraftModel
+from speculators.models.eagle1_train.config import Eagle1TrainSpeculatorConfig
 from speculators.models.eagle3 import Eagle3SpeculatorConfig
 from speculators.models.eagle3.core import Eagle3DraftModel
 from speculators.models.mtp import MTPSpeculatorConfig
@@ -117,6 +119,32 @@ def make_eagle3_model(
         ),
     )
     model = Eagle3DraftModel(config)
+    _fill_nan_weights(model)
+    return model.to(device=device, dtype=dtype)  # type: ignore[call-arg]
+
+
+def make_eagle1_train_model(
+    *,
+    draft_vocab_size: int = 64,
+    device: str = "cuda:0",
+    dtype: torch.dtype = torch.bfloat16,
+) -> Eagle1TrainDraftModel:
+    """Create a tiny Eagle1 training model with real initialized weights."""
+    config = Eagle1TrainSpeculatorConfig(
+        transformer_layer_config=copy.deepcopy(TINY_LLAMA_CONFIG),
+        draft_vocab_size=draft_vocab_size,
+        eagle_aux_hidden_state_layer_ids=[0],
+        speculators_config=SpeculatorsConfig(
+            algorithm="eagle",
+            proposal_methods=[GreedyTokenProposalConfig(speculative_tokens=1)],
+            default_proposal_method="greedy",
+            verifier=VerifierConfig(
+                name_or_path=None,
+                architectures=["LlamaForCausalLM"],
+            ),
+        ),
+    )
+    model = Eagle1TrainDraftModel(config)
     _fill_nan_weights(model)
     return model.to(device=device, dtype=dtype)  # type: ignore[call-arg]
 

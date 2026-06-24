@@ -28,6 +28,35 @@ def _normalize_ultrachat(example: dict) -> dict:
     return example
 
 
+def _normalize_magpie(example: dict) -> dict:
+    if "conversations" in example:
+        return example
+    if "messages" in example:
+        return {"conversations": example["messages"]}
+
+    prompt = (
+        example.get("instruction")
+        or example.get("query")
+        or example.get("input")
+        or example.get("prompt")
+    )
+    response = (
+        example.get("response")
+        or example.get("output")
+        or example.get("answer")
+        or example.get("completion")
+    )
+    if prompt is not None and response is not None:
+        return {
+            "conversations": [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": response},
+            ]
+        }
+
+    return example
+
+
 def _normalize_gsm8k(example: dict) -> dict:
     return {
         "conversations": [
@@ -102,6 +131,12 @@ DATASET_CONFIGS: dict[str, DatasetConfig] = {
         hf_path="HuggingFaceH4/ultrachat_200k",
         split="train_sft",
         normalize_fn=_normalize_ultrachat,
+    ),
+    "magpie": DatasetConfig(
+        name="magpie",
+        hf_path="Magpie-Align/Magpie-Llama-3.1-Pro-300K-Filtered",
+        split="train",
+        normalize_fn=_normalize_magpie,
     ),
     "gsm8k": DatasetConfig(
         name="gsm8k",
