@@ -3,7 +3,7 @@
 #
 # Defaults are intentionally tiny. Override variables from the shell for a larger
 # run, for example:
-#   MAX_SAMPLES=64 SEQ_LENGTH=1024 AUX_LAYER_ID=45 \
+#   MAX_SAMPLES=64 SEQ_LENGTH=1024 AUX_LAYER_ID=47 \
 #     bash examples/train/eagle1_qwen30b_a3b_moe_online_smoke.sh
 
 set -euo pipefail
@@ -19,15 +19,18 @@ DATASETS="${DATASETS:-magpie ultrachat}"
 RUN_NAME="${RUN_NAME:-eagle1_qwen30b_a3b_online_smoke}"
 OUTPUT_DIR="${OUTPUT_DIR:-$WORKSPACE/runs/$RUN_NAME}"
 HIDDEN_STATES_DIR="${HIDDEN_STATES_DIR:-$OUTPUT_DIR/hidden_states}"
+# Set MAX_SAMPLES=0 to process the full dataset split.
 MAX_SAMPLES="${MAX_SAMPLES:-64}"
 SEQ_LENGTH="${SEQ_LENGTH:-512}"
+TOTAL_SEQ_LEN="${TOTAL_SEQ_LEN:-$SEQ_LENGTH}"
 VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-$((SEQ_LENGTH + 1))}"
 MINIMUM_VALID_TOKENS="${MINIMUM_VALID_TOKENS:-1}"
 OVERWRITE_DATA="${OVERWRITE_DATA:-0}"
 
-# Qwen3-30B-A3B has 48 layers. 45 is the EAGLE-style late aux layer; the launch
-# wrapper appends the final layer automatically for verifier KL targets.
-AUX_LAYER_ID="${AUX_LAYER_ID:-45}"
+# Qwen3-30B-A3B has 48 layers. EAGLE1 predicts the second-to-top-layer feature,
+# so 47 is the default aux layer; the launch wrapper appends final layer 48 for
+# verifier KL targets.
+AUX_LAYER_ID="${AUX_LAYER_ID:-47}"
 DRAFT_VOCAB_SIZE="${DRAFT_VOCAB_SIZE:-64000}"
 
 # ============ Training ============
@@ -51,7 +54,7 @@ TRAIN_GPUS="${TRAIN_GPUS:-2}"
 NUM_TRAIN_GPUS="${NUM_TRAIN_GPUS:-1}"
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-240}"
 MAX_RETRIES="${MAX_RETRIES:-3}"
-ON_GENERATE="${ON_GENERATE:-cache}"
+ON_GENERATE="${ON_GENERATE:-delete}"
 
 mkdir -p "$OUTPUT_DIR" "$HIDDEN_STATES_DIR"
 
@@ -63,6 +66,9 @@ done
 PREPARE_ARGS=()
 if [[ "$OVERWRITE_DATA" == "1" ]]; then
     PREPARE_ARGS+=(--overwrite)
+fi
+if [[ "$MAX_SAMPLES" != "0" ]]; then
+    PREPARE_ARGS+=(--max-samples "$MAX_SAMPLES")
 fi
 
 VLLM_EXTRA_ARGS=(
@@ -90,7 +96,6 @@ echo "=== Step 1: Preparing Magpie + UltraChat data ==="
     --model "$MODEL" \
     "${DATA_ARGS[@]}" \
     --output "$OUTPUT_DIR" \
-    --max-samples "$MAX_SAMPLES" \
     --seq-length "$SEQ_LENGTH" \
     --minimum-valid-tokens "$MINIMUM_VALID_TOKENS" \
     --num-preprocessing-workers 4 \
@@ -129,7 +134,7 @@ TRAIN_CMD=(
     --draft-vocab-size "$DRAFT_VOCAB_SIZE"
     --epochs "$EPOCHS"
     --lr "$LR"
-    --total-seq-len "$SEQ_LENGTH"
+    --total-seq-len "$TOTAL_SEQ_LEN"
     --ttt-steps "$TTT_STEPS"
     --loss-fn "$LOSS_FN"
     --hidden-states-dtype bfloat16
