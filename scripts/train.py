@@ -390,6 +390,10 @@ def main(args: argparse.Namespace):
             hidden_states_dtype=hidden_states_dtype,
         )
     else:
+        if not (0.0 <= args.validation_split < 1.0):
+            raise ValueError("--validation-split must be in range [0.0, 1.0).")
+
+        train_split_ratio = 1.0 - args.validation_split
         train_dataset = ArrowDataset(
             datapath=args.data_path,
             max_len=args.total_seq_len,
@@ -398,25 +402,28 @@ def main(args: argparse.Namespace):
             on_missing=args.on_missing,
             on_generate=args.on_generate,
             transform=noise_transform,
-            split_ratio=0.9,
+            split_ratio=train_split_ratio,
             model=args.verifier_name_or_path,
             hidden_states_dtype=hidden_states_dtype,
             request_timeout=args.request_timeout,
             max_retries=args.max_retries,
         )
-        val_dataset = ArrowDataset(
-            datapath=args.data_path,
-            max_len=args.total_seq_len,
-            hidden_states_path=args.hidden_states_path,
-            vllm_endpoint=args.vllm_endpoint,
-            on_missing=args.on_missing,
-            on_generate=args.on_generate,
-            split_ratio=-0.1,
-            model=args.verifier_name_or_path,
-            hidden_states_dtype=hidden_states_dtype,
-            request_timeout=args.request_timeout,
-            max_retries=args.max_retries,
-        )
+        if args.validation_split > 0.0:
+            val_dataset = ArrowDataset(
+                datapath=args.data_path,
+                max_len=args.total_seq_len,
+                hidden_states_path=args.hidden_states_path,
+                vllm_endpoint=args.vllm_endpoint,
+                on_missing=args.on_missing,
+                on_generate=args.on_generate,
+                split_ratio=-args.validation_split,
+                model=args.verifier_name_or_path,
+                hidden_states_dtype=hidden_states_dtype,
+                request_timeout=args.request_timeout,
+                max_retries=args.max_retries,
+            )
+        else:
+            val_dataset = None
 
     train_loader = setup_dataloader(
         train_dataset,
@@ -428,15 +435,19 @@ def main(args: argparse.Namespace):
         prefetch_factor=args.prefetch_factor,
         preprocess=preprocess,
     )
-    val_loader = setup_dataloader(
-        val_dataset,
-        world_size,
-        local_rank,
-        transformer_layer_config.hidden_size,
-        num_target_layers=num_target_layers,
-        num_workers=args.num_workers,
-        prefetch_factor=args.prefetch_factor,
-        preprocess=preprocess,
+    val_loader = (
+        setup_dataloader(
+            val_dataset,
+            world_size,
+            local_rank,
+            transformer_layer_config.hidden_size,
+            num_target_layers=num_target_layers,
+            num_workers=args.num_workers,
+            prefetch_factor=args.prefetch_factor,
+            preprocess=preprocess,
+        )
+        if val_dataset is not None
+        else None
     )
 
     # Get trainer kwargs from model class
@@ -557,6 +568,15 @@ def parse_args():
             "the hidden states in the args.hidden_states_path. This can be used to "
             "enable hybrid online/offline training, with hidden states generated on the"
             "first epoch, and reused on subsequent epochs."
+        ),
+    )
+    parser.add_argument(
+        "--validation-split",
+        type=float,
+        default=0.1,
+        help=(
+            "Fraction of the arrow dataset to reserve for validation. Set to 0 "
+            "to skip validation and train on the full dataset."
         ),
     )
     parser.add_argument(

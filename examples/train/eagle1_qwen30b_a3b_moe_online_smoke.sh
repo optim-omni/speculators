@@ -38,6 +38,8 @@ EPOCHS="${EPOCHS:-1}"
 LR="${LR:-1e-4}"
 TTT_STEPS="${TTT_STEPS:-2}"
 LOSS_FN="${LOSS_FN:-kl_div}"
+VALIDATION_SPLIT="${VALIDATION_SPLIT:-0}"
+SAVE_BEST="${SAVE_BEST:-0}"
 NUM_WORKERS="${NUM_WORKERS:-1}"
 PREFETCH_FACTOR="${PREFETCH_FACTOR:-2}"
 MOE_SPEC_EAGLE1_TORCH_COMPILE="${MOE_SPEC_EAGLE1_TORCH_COMPILE:-0}"
@@ -146,13 +148,16 @@ TRAIN_CMD=(
     --prefetch-factor "$PREFETCH_FACTOR"
     --log-freq 1
     --checkpoint-freq 1
-    --save-best
     --scheduler-type cosine
     --on-missing generate
     --on-generate "$ON_GENERATE"
+    --validation-split "$VALIDATION_SPLIT"
     --request-timeout "$REQUEST_TIMEOUT"
     --max-retries "$MAX_RETRIES"
 )
+if [[ "$SAVE_BEST" == "1" ]]; then
+    TRAIN_CMD+=(--save-best)
+fi
 
 echo "=== Step 3: Training EAGLE1 drafter online ==="
 if [[ "$NUM_TRAIN_GPUS" -gt 1 ]]; then
