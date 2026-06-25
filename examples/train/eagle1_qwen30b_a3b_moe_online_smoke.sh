@@ -31,13 +31,18 @@ OVERWRITE_DATA="${OVERWRITE_DATA:-0}"
 # so 47 is the default aux layer; the launch wrapper appends final layer 48 for
 # verifier KL targets.
 AUX_LAYER_ID="${AUX_LAYER_ID:-47}"
+# Set DRAFT_VOCAB_SIZE=full to omit --draft-vocab-size and train/evaluate
+# against the verifier's complete vocabulary without d2t/t2d remapping.
 DRAFT_VOCAB_SIZE="${DRAFT_VOCAB_SIZE:-64000}"
 
 # ============ Training ============
 EPOCHS="${EPOCHS:-1}"
 LR="${LR:-1e-4}"
-TTT_STEPS="${TTT_STEPS:-2}"
+TTT_STEPS="${TTT_STEPS:-4}"
 LOSS_FN="${LOSS_FN:-kl_div}"
+EAGLE1_LOSS_MODE="${EAGLE1_LOSS_MODE:-eagle1_hass}"
+EAGLE1_VLOSS_WEIGHT="${EAGLE1_VLOSS_WEIGHT:-1.0}"
+EAGLE1_PLOSS_WEIGHT="${EAGLE1_PLOSS_WEIGHT:-0.1}"
 VALIDATION_SPLIT="${VALIDATION_SPLIT:-0}"
 SAVE_BEST="${SAVE_BEST:-0}"
 NUM_WORKERS="${NUM_WORKERS:-1}"
@@ -137,12 +142,14 @@ TRAIN_CMD=(
     --save-path "$OUTPUT_DIR/checkpoints"
     --speculator-type eagle1_train
     --target-layer-ids "$AUX_LAYER_ID"
-    --draft-vocab-size "$DRAFT_VOCAB_SIZE"
     --epochs "$EPOCHS"
     --lr "$LR"
     --total-seq-len "$TOTAL_SEQ_LEN"
     --ttt-steps "$TTT_STEPS"
     --loss-fn "$LOSS_FN"
+    --eagle1-loss-mode "$EAGLE1_LOSS_MODE"
+    --eagle1-vloss-weight "$EAGLE1_VLOSS_WEIGHT"
+    --eagle1-ploss-weight "$EAGLE1_PLOSS_WEIGHT"
     --hidden-states-dtype bfloat16
     --num-workers "$NUM_WORKERS"
     --prefetch-factor "$PREFETCH_FACTOR"
@@ -155,6 +162,13 @@ TRAIN_CMD=(
     --request-timeout "$REQUEST_TIMEOUT"
     --max-retries "$MAX_RETRIES"
 )
+if [[ -n "$DRAFT_VOCAB_SIZE" \
+    && "$DRAFT_VOCAB_SIZE" != "full" \
+    && "$DRAFT_VOCAB_SIZE" != "target" \
+    && "$DRAFT_VOCAB_SIZE" != "none" \
+    && "$DRAFT_VOCAB_SIZE" != "0" ]]; then
+    TRAIN_CMD+=(--draft-vocab-size "$DRAFT_VOCAB_SIZE")
+fi
 if [[ "$SAVE_BEST" == "1" ]]; then
     TRAIN_CMD+=(--save-best)
 fi

@@ -12,8 +12,13 @@ from speculators.config import SpeculatorsConfig, VerifierConfig
 from speculators.model import DraftVocabMixin, SpeculatorModel
 from speculators.models.base_components import model_classes
 from speculators.models.eagle1_train.config import Eagle1TrainSpeculatorConfig
-from speculators.models.eagle3.metrics import compute_metrics
-from speculators.models.metrics import kl_div_loss, resolve_loss_fn
+from speculators.models.eagle3.metrics import align_for_step, compute_metrics
+from speculators.models.metrics import (
+    compute_accuracy_single_step,
+    exp_loss_decay,
+    kl_div_loss,
+    resolve_loss_fn,
+)
 from speculators.models.utils import get_verifier_config
 from speculators.proposals.greedy import GreedyTokenProposalConfig
 
@@ -85,6 +90,78 @@ def _packed_causal_mask(
     return mask.masked_fill(~allowed.unsqueeze(0).unsqueeze(0), torch.finfo(dtype).min)
 
 
+def _masked_average(values: torch.Tensor, loss_mask: torch.Tensor) -> torch.Tensor:
+    loss_mask = loss_mask.to(values.dtype)
+    denominator = loss_mask.sum(dim=1).clamp_min(1e-5)
+    batch_loss = torch.sum(values * loss_mask, dim=1) / denominator
+    return batch_loss.mean()
+
+
+def _compute_eagle1_hass_metrics(
+    *,
+    predicted_hidden: torch.Tensor,
+    target_hidden: torch.Tensor,
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    loss_mask: torch.Tensor | None,
+    prev_correct: torch.Tensor | None,
+    ttt_step: int,
+    ttt_step_loss_decay: float,
+    vloss_weight: float,
+    ploss_weight: float,
+) -> tuple[torch.Tensor, dict]:
+    s_logits, s_targets, s_loss_mask, s_prev_correct = align_for_step(
+        logits, targets, loss_mask, prev_correct, ttt_step
+    )
+    s_predicted_hidden = (
+        predicted_hidden[:, :-ttt_step] if ttt_step > 0 else predicted_hidden
+    )
+    s_target_hidden = target_hidden[:, ttt_step:]
+
+    seq_len = s_logits.shape[1]
+    if s_loss_mask is None:
+        s_loss_mask = torch.ones(
+            1, seq_len, device=s_logits.device, dtype=torch.bool
+        )
+
+    feature_loss = nn.functional.smooth_l1_loss(
+        s_predicted_hidden,
+        s_target_hidden,
+        reduction="none",
+    ).mean(dim=-1)
+    vloss = _masked_average(feature_loss, s_loss_mask)
+
+    target_probs = nn.functional.softmax(s_targets, dim=-1).detach()
+    log_probs = nn.functional.log_softmax(s_logits, dim=-1)
+    token_loss = -(target_probs * log_probs).sum(dim=-1)
+    ploss = _masked_average(token_loss, s_loss_mask)
+
+    decay = exp_loss_decay(
+        torch.tensor(float(ttt_step), device=s_logits.device),
+        gamma=ttt_step_loss_decay,
+    )
+    loss = decay * (vloss_weight * vloss + ploss_weight * ploss)
+
+    pred_ids = torch.argmax(s_logits, dim=-1)
+    target_ids = torch.argmax(s_targets, dim=-1)
+    full_correct, full_total, cond_correct, cond_total = compute_accuracy_single_step(
+        pred_ids, target_ids, s_loss_mask, s_prev_correct
+    )
+
+    return loss, {
+        f"loss_{ttt_step}_sum": loss.detach().clone(),
+        f"loss_{ttt_step}_total": torch.tensor(1.0, device=loss.device),
+        f"vloss_{ttt_step}_sum": vloss.detach().clone(),
+        f"vloss_{ttt_step}_total": torch.tensor(1.0, device=loss.device),
+        f"ploss_{ttt_step}_sum": ploss.detach().clone(),
+        f"ploss_{ttt_step}_total": torch.tensor(1.0, device=loss.device),
+        f"full_acc_{ttt_step}_sum": full_correct,
+        f"full_acc_{ttt_step}_total": full_total,
+        f"cond_acc_{ttt_step}_sum": cond_correct,
+        f"cond_acc_{ttt_step}_total": cond_total,
+    }
+
+
 @SpeculatorModel.register("eagle1_train")
 class Eagle1TrainDraftModel(DraftVocabMixin, SpeculatorModel):
     """EAGLE1-style drafter trained through the EAGLE3 trainer path.
@@ -127,10 +204,10 @@ class Eagle1TrainDraftModel(DraftVocabMixin, SpeculatorModel):
         self.layers = nn.ModuleList(
             [self._model_definitions.decoder_layer_class(tl_config, layer_idx=0)]
         )
+        self.layers[0].input_layernorm = nn.Identity()
         self.rotary_emb = self._model_definitions.rotary_emb_class(tl_config)
 
         norm_class = self._model_definitions.norm_class
-        self.norm = norm_class(self.hidden_size, eps=tl_config.rms_norm_eps)
         self.verifier_norm = norm_class(self.hidden_size, eps=tl_config.rms_norm_eps)
         self.verifier_norm.weight.requires_grad = False
 
@@ -189,6 +266,9 @@ class Eagle1TrainDraftModel(DraftVocabMixin, SpeculatorModel):
         ttt_step_loss_decay: float = 1.0,
         use_off_policy_tokens: bool = False,
         loss_fn=kl_div_loss,
+        loss_mode: str = "eagle1_hass",
+        vloss_weight: float = 1.0,
+        ploss_weight: float = 0.1,
         **kwargs: Any,
     ):
         impl = self._compiled_forward_impl or self._forward_impl
@@ -203,6 +283,9 @@ class Eagle1TrainDraftModel(DraftVocabMixin, SpeculatorModel):
             ttt_step_loss_decay=ttt_step_loss_decay,
             use_off_policy_tokens=use_off_policy_tokens,
             loss_fn=loss_fn,
+            loss_mode=loss_mode,
+            vloss_weight=vloss_weight,
+            ploss_weight=ploss_weight,
             **kwargs,
         )
 
@@ -218,10 +301,18 @@ class Eagle1TrainDraftModel(DraftVocabMixin, SpeculatorModel):
         ttt_step_loss_decay: float = 1.0,
         use_off_policy_tokens: bool = False,
         loss_fn=kl_div_loss,
+        loss_mode: str = "eagle1_hass",
+        vloss_weight: float = 1.0,
+        ploss_weight: float = 0.1,
         **kwargs: Any,
     ):
         del kwargs
         loss_fn = loss_fn or kl_div_loss
+        if loss_mode not in {"eagle1_hass", "token_logits"}:
+            raise ValueError(
+                "eagle1_train loss_mode must be 'eagle1_hass' or 'token_logits', "
+                f"got {loss_mode!r}."
+            )
         device = hidden_states.device
         total_seq_len = hidden_states.shape[1]
 
@@ -251,9 +342,10 @@ class Eagle1TrainDraftModel(DraftVocabMixin, SpeculatorModel):
         return_loss = verifier_last_hidden_states is not None
         if return_loss:
             with torch.no_grad():
-                targets = self.verifier_lm_head(
-                    self.verifier_norm(verifier_last_hidden_states)
+                verifier_logit_hidden_states = self.verifier_norm(
+                    verifier_last_hidden_states
                 )
+                targets = self.verifier_lm_head(verifier_logit_hidden_states)
 
             loss = torch.tensor(0.0, device=device)
             prev_correct = (
@@ -282,9 +374,9 @@ class Eagle1TrainDraftModel(DraftVocabMixin, SpeculatorModel):
                     position_embeddings=position_embeddings,
                 )
 
-            logits = self.lm_head(self.norm(current_hidden))
+            logits = self.lm_head(current_hidden)
 
-            if return_loss:
+            if return_loss and loss_mode == "token_logits":
                 s_loss, s_metrics = compute_metrics(
                     logits,
                     targets,
@@ -293,6 +385,21 @@ class Eagle1TrainDraftModel(DraftVocabMixin, SpeculatorModel):
                     ttt_step,
                     ttt_step_loss_decay,
                     loss_fn=loss_fn,
+                )
+                loss = loss + s_loss
+                metrics.update(s_metrics)
+            elif return_loss:
+                s_loss, s_metrics = _compute_eagle1_hass_metrics(
+                    predicted_hidden=current_hidden,
+                    target_hidden=verifier_logit_hidden_states,
+                    logits=logits,
+                    targets=targets,
+                    loss_mask=loss_mask,
+                    prev_correct=prev_correct,
+                    ttt_step=ttt_step,
+                    ttt_step_loss_decay=ttt_step_loss_decay,
+                    vloss_weight=vloss_weight,
+                    ploss_weight=ploss_weight,
                 )
                 loss = loss + s_loss
                 metrics.update(s_metrics)
@@ -357,16 +464,23 @@ class Eagle1TrainDraftModel(DraftVocabMixin, SpeculatorModel):
     @staticmethod
     def get_trainer_kwargs(**kwargs) -> tuple[dict, dict]:
         loss_fn = resolve_loss_fn(kwargs["loss_fn"])
+        loss_mode = kwargs.get("eagle1_loss_mode", "eagle1_hass")
         train_kwargs = {
             "use_off_policy_tokens": kwargs["use_off_policy_tokens"],
             "ttt_steps": kwargs["ttt_steps"],
             "ttt_step_loss_decay": kwargs["ttt_step_loss_decay"],
             "loss_fn": loss_fn,
+            "loss_mode": loss_mode,
+            "vloss_weight": kwargs.get("eagle1_vloss_weight", 1.0),
+            "ploss_weight": kwargs.get("eagle1_ploss_weight", 0.1),
         }
         val_kwargs = {
             "use_off_policy_tokens": False,
             "ttt_steps": kwargs["ttt_steps"],
             "ttt_step_loss_decay": kwargs["ttt_step_loss_decay"],
             "loss_fn": loss_fn,
+            "loss_mode": loss_mode,
+            "vloss_weight": kwargs.get("eagle1_vloss_weight", 1.0),
+            "ploss_weight": kwargs.get("eagle1_ploss_weight", 0.1),
         }
         return train_kwargs, val_kwargs

@@ -701,6 +701,29 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--eagle1-loss-mode",
+        type=str,
+        default="eagle1_hass",
+        choices=["eagle1_hass", "token_logits"],
+        help=(
+            "Loss mode for eagle1_train. 'eagle1_hass' uses EAGLE/HASS-style "
+            "feature SmoothL1 vloss plus soft-token ploss. 'token_logits' keeps "
+            "the legacy token-only KL/CE path."
+        ),
+    )
+    parser.add_argument(
+        "--eagle1-vloss-weight",
+        type=float,
+        default=1.0,
+        help="Feature-regression vloss weight for eagle1_train.",
+    )
+    parser.add_argument(
+        "--eagle1-ploss-weight",
+        type=float,
+        default=0.1,
+        help="Soft-token ploss weight for eagle1_train.",
+    )
+    parser.add_argument(
         "--step-weight-beta",
         type=float,
         default=0.6,
